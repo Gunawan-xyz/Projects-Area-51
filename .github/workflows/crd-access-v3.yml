@@ -237,6 +237,38 @@ jobs:
           disown || true
           echo "Loop backup background jalan (tiap 1 menit, log /tmp/macbook-sync.log)."
 
+      - name: Restore Notes (rclone dari Google Drive)
+        if: env.GDRIVE_TOKEN != ''
+        env:
+          GDRIVE_TOKEN: ${{ secrets.GDRIVE_TOKEN }}
+        continue-on-error: true
+        run: |
+          set -uo pipefail
+          # Wadah database Apple Notes disinkronkan ke folder Drive
+          # "NotesMac" (permintaan Awan 25 Nov 2026, khusus V3).
+          # Berbeda dari folder Macbook: wadah ini TIDAK ikut loop
+          # 1 menit, karena database SQLite Notes hidup selagi
+          # aplikasinya terbuka dan menyalinnya di tengah jalan bisa
+          # merusak isi. Restore aman di titik ini karena Notes belum
+          # pernah dibuka di mesin baru; backupnya hanya sekali di
+          # akhir sesi sesudah Notes ditutup dengan sopan.
+          export RCLONE_CONFIG_GDRIVE_TYPE=drive
+          export RCLONE_CONFIG_GDRIVE_TOKEN="$GDRIVE_TOKEN"
+          if ! command -v rclone >/dev/null 2>&1; then
+            echo "::warning::rclone tidak tersedia; restore Notes dilewati, sesi tetap jalan."
+            exit 0
+          fi
+          NOTES_DIR="$HOME/Library/Group Containers/group.com.apple.notes"
+          mkdir -p "$NOTES_DIR"
+          echo "Restore gdrive:NotesMac -> wadah Notes ..."
+          if rclone sync "gdrive:NotesMac" "$NOTES_DIR" 2>&1 | tail -3; then
+            touch /tmp/notes-restore-ok
+            echo "Restore Notes selesai; penanda backup ditulis."
+          else
+            echo "::warning::restore Notes gagal; backup Notes sesi ini DILEWATI demi keamanan isi Drive."
+            exit 0
+          fi
+
       - name: Sambungkan Tailscale (biar Lyra bisa SSH masuk)
         env:
           TAILSCALE_AUTHKEY: ${{ secrets.TAILSCALE_AUTHKEY }}
@@ -447,3 +479,48 @@ jobs:
             --backup-dir "gdrive:_versi/$STAMP" 2>&1 | tail -3 \
             || echo "::warning::backup akhir gagal; isi Drive tidak berubah dari sync berkala terakhir."
           echo "Backup akhir selesai."
+
+      - name: Backup Notes (rclone ke Google Drive)
+        if: ${{ always() && env.GDRIVE_TOKEN != '' }}
+        env:
+          GDRIVE_TOKEN: ${{ secrets.GDRIVE_TOKEN }}
+        continue-on-error: true
+        run: |
+          set -uo pipefail
+          # Pasangan step Restore Notes di awal sesi: salin wadah
+          # database Notes ke gdrive:NotesMac SEKALI saja di akhir
+          # sesi, sesudah Notes ditutup dengan sopan supaya database
+          # SQLite-nya tertulis tuntas (checkpoint WAL selesai).
+          # Bila restore di awal gagal (tidak ada penanda), langkah
+          # ini SENGAJA dilewati: wadah kosong di mesin baru tidak
+          # boleh menimpa catatan yang ada di Drive.
+          export RCLONE_CONFIG_GDRIVE_TYPE=drive
+          export RCLONE_CONFIG_GDRIVE_TOKEN="$GDRIVE_TOKEN"
+          if [ ! -f /tmp/notes-restore-ok ]; then
+            echo "::warning::restore Notes awal tidak berhasil; backup Notes akhir dilewati demi keamanan isi Drive."
+            exit 0
+          fi
+          if ! command -v rclone >/dev/null 2>&1; then
+            echo "::warning::rclone tidak tersedia; backup Notes akhir dilewati."
+            exit 0
+          fi
+          NOTES_DIR="$HOME/Library/Group Containers/group.com.apple.notes"
+          if [ ! -f "$NOTES_DIR/NoteStore.sqlite" ]; then
+            echo "Tidak ada database Notes di sesi ini (Notes tidak pernah dipakai); backup Notes dilewati."
+            exit 0
+          fi
+          if pgrep -x Notes >/dev/null 2>&1; then
+            echo "Menutup Notes dengan sopan sebelum backup..."
+            osascript -e 'tell application "Notes" to quit' 2>/dev/null || true
+            for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+              pgrep -x Notes >/dev/null 2>&1 || break
+              sleep 1
+            done
+            sleep 2
+          fi
+          STAMP="$(cat /tmp/macbook-sync-stamp 2>/dev/null || date +%Y%m%d-%H%M%S)"
+          echo "Backup akhir wadah Notes -> gdrive:NotesMac (versi cadangan: _versi-notes/$STAMP)..."
+          rclone sync "$NOTES_DIR" "gdrive:NotesMac" \
+            --backup-dir "gdrive:_versi-notes/$STAMP" 2>&1 | tail -3 \
+            || echo "::warning::backup Notes akhir gagal; isi Drive tidak berubah."
+          echo "Backup Notes akhir selesai."
