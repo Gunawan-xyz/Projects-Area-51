@@ -148,6 +148,64 @@ jobs:
         run: |
           bash scripts/crd/setup_crd_v2.sh
 
+      - name: Restore folder kerja Macbook (rclone dari Google Drive)
+        if: env.GDRIVE_TOKEN != ''
+        env:
+          GDRIVE_TOKEN: ${{ secrets.GDRIVE_TOKEN }}
+        continue-on-error: true
+        run: |
+          set -uo pipefail
+          # Folder kerja persisten ~/Macbook (rencana disetujui Awan
+          # 24 Nov 2026): isi folder disinkronkan ke Google Drive folder
+          # "Macbook" pakai rclone, tanpa Drive Desktop sama sekali.
+          # Token OAuth hanya hidup sebagai secret GDRIVE_TOKEN dan
+          # diteruskan ke rclone lewat environment variable; token TIDAK
+          # pernah ditulis ke berkas di runner. Remote sengaja TIDAK
+          # dikunci ke satu folder (keputusan Awan): target sinkron
+          # selalu ditulis eksplisit sebagai path gdrive:Macbook.
+          export RCLONE_CONFIG_GDRIVE_TYPE=drive
+          export RCLONE_CONFIG_GDRIVE_TOKEN="$GDRIVE_TOKEN"
+          if ! command -v rclone >/dev/null 2>&1; then
+            echo "Install rclone..."
+            brew install rclone 2>&1 | tail -2 || echo "::warning::brew install rclone gagal"
+          fi
+          if ! command -v rclone >/dev/null 2>&1; then
+            echo "::warning::rclone tidak tersedia; restore dilewati, sesi tetap jalan."
+            exit 0
+          fi
+          STAMP="$(date +%Y%m%d-%H%M%S)"
+          echo "$STAMP" > /tmp/macbook-sync-stamp
+          mkdir -p "$HOME/Macbook"
+          echo "Restore gdrive:Macbook -> ~/Macbook ..."
+          if rclone sync "gdrive:Macbook" "$HOME/Macbook" 2>&1 | tail -3; then
+            touch /tmp/macbook-restore-ok
+            echo "Restore selesai; penanda backup ditulis."
+          else
+            echo "::warning::restore gagal; backup sesi ini DILEWATI demi keamanan isi Drive."
+            exit 0
+          fi
+          # Loop backup background: tiap 1 menit sync lokal -> Drive
+          # (near-realtime; rclone hanya mengirim berkas yang berubah).
+          # File yang tertimpa/terhapus di Drive diselamatkan ke
+          # gdrive:_versi/<stamp sesi> lewat --backup-dir. Loop ini
+          # mewarisi token dari environment proses ini, bukan dari
+          # berkas. Ia hanya jalan selama penanda restore ada.
+          cat > /tmp/macbook-sync-loop.sh <<'LOOP'
+          #!/bin/bash
+          STAMP="$(cat /tmp/macbook-sync-stamp 2>/dev/null || date +%Y%m%d-%H%M%S)"
+          while true; do
+            sleep 60
+            [ -f /tmp/macbook-restore-ok ] || continue
+            rclone sync "$HOME/Macbook" "gdrive:Macbook" \
+              --backup-dir "gdrive:_versi/$STAMP" \
+              >> /tmp/macbook-sync.log 2>&1 || true
+          done
+          LOOP
+          chmod +x /tmp/macbook-sync-loop.sh
+          nohup bash /tmp/macbook-sync-loop.sh >/dev/null 2>&1 &
+          disown || true
+          echo "Loop backup background jalan (tiap 1 menit, log /tmp/macbook-sync.log)."
+
       - name: Sambungkan Tailscale (biar Lyra bisa SSH masuk)
         env:
           TAILSCALE_AUTHKEY: ${{ secrets.TAILSCALE_AUTHKEY }}
@@ -325,3 +383,36 @@ jobs:
           KEEP_ALIVE_MINUTES: ${{ inputs.keep_alive_minutes }}
         run: |
           bash scripts/keep_alive.sh
+
+      - name: Backup folder kerja Macbook (rclone ke Google Drive)
+        if: ${{ always() && env.GDRIVE_TOKEN != '' }}
+        env:
+          GDRIVE_TOKEN: ${{ secrets.GDRIVE_TOKEN }}
+        continue-on-error: true
+        run: |
+          set -uo pipefail
+          # Sync terakhir ~/Macbook -> Drive sebelum runner mati,
+          # pasangan step restore di awal sesi. Berjalan dengan
+          # if: always() supaya tetap sempat jalan saat sesi berakhir
+          # tidak normal (termasuk timeout). Bila restore di awal sesi
+          # gagal (tidak ada penanda), langkah ini SENGAJA melewatkan
+          # sync: folder lokal yang kosong tidak boleh menghapus isi
+          # Drive.
+          export RCLONE_CONFIG_GDRIVE_TYPE=drive
+          export RCLONE_CONFIG_GDRIVE_TOKEN="$GDRIVE_TOKEN"
+          pkill -f macbook-sync-loop 2>/dev/null || true
+          sleep 2
+          if [ ! -f /tmp/macbook-restore-ok ]; then
+            echo "::warning::restore awal tidak berhasil; backup akhir dilewati demi keamanan isi Drive."
+            exit 0
+          fi
+          if ! command -v rclone >/dev/null 2>&1; then
+            echo "::warning::rclone tidak tersedia; backup akhir dilewati."
+            exit 0
+          fi
+          STAMP="$(cat /tmp/macbook-sync-stamp 2>/dev/null || date +%Y%m%d-%H%M%S)"
+          echo "Backup akhir ~/Macbook -> gdrive:Macbook (versi cadangan: _versi/$STAMP)..."
+          rclone sync "$HOME/Macbook" "gdrive:Macbook" \
+            --backup-dir "gdrive:_versi/$STAMP" 2>&1 | tail -3 \
+            || echo "::warning::backup akhir gagal; isi Drive tidak berubah dari sync berkala terakhir."
+          echo "Backup akhir selesai."
