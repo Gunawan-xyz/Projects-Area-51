@@ -60,8 +60,7 @@ jobs:
             exit 0
           fi
           NEXT=$(( ${GACHA_ATTEMPT:-0} + 1 ))
-          echo "Bukan M2 Pro. Jeda 1 menit dulu sebelum lempar ulang (permintaan Awan 25 Nov 2026: penghalus laju gacha, biar siklusnya tidak beruntun terlalu cepat)."
-          sleep 60
+          echo "Bukan M2 Pro. Langsung lempar ulang tanpa jeda (eksperimen tanpa rem, keputusan Awan 27 Nov 2026; jeda 1 menit dari commit 5c349c5 dihapus)."
           echo "Mengantrekan run pengganti (percobaan $NEXT), lalu run ini dibatalkan."
           gh workflow run crd-access-v3.yml --repo "$GITHUB_REPOSITORY" \
             -f hostname="${{ inputs.hostname }}" \
